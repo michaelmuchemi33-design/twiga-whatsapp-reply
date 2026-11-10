@@ -10,6 +10,10 @@ const OPENWA_API_KEY = process.env.OPENWA_API_KEY || "";
 const OPENWA_WEBHOOK_SECRET = process.env.OPENWA_WEBHOOK_SECRET || "";
 const XAI_API_KEY = process.env.XAI_API_KEY || "";
 const XAI_MODEL = process.env.XAI_MODEL || "grok-3-mini";
+const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID || "";
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID || "";
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY || "";
+const R2_BUCKET = process.env.R2_BUCKET || "twiga-product-images";
 const DASHBOARD_ORIGINS = (process.env.DASHBOARD_ORIGINS || "").split(",").map(x => x.trim()).filter(Boolean);
 const DEFAULT_REPLY_PROMPT = process.env.DEFAULT_REPLY_PROMPT ||
   "You are TWIGA, a helpful WhatsApp receptionist for this business in Kenya. Reply naturally, warmly and concisely. Use clear English; understand Kiswahili and Sheng and reply in the language the customer uses. Never invent prices, stock, order status, appointment availability, policies or promises. If information is missing, ask one clear question or say a staff member will confirm. Never ask for passwords, PINs, OTPs or payment credentials. Never initiate calls. Do not send marketing messages unless the customer has explicitly opted in.";
@@ -38,6 +42,41 @@ async function supa(path, options = {}) {
   const body = await response.text();
   if (!response.ok) throw new Error("Supabase " + response.status + ": " + body.slice(0, 500));
   return body ? JSON.parse(body) : null;
+}
+function awsEncode(value) {
+  return encodeURIComponent(String(value)).replace(/[!'()*]/g, c => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+}
+function r2Hmac(key, value) {
+  return crypto.createHmac("sha256", key).update(value).digest();
+}
+function presignR2(method, objectKey, contentType = "", expiresSeconds = 900) {
+  if (!R2_ACCOUNT_ID || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET) {
+    throw Object.assign(new Error("Cloudflare R2 is not configured on the TWIGA service"), { status: 503 });
+  }
+  const host = R2_ACCOUNT_ID + ".r2.cloudflarestorage.com";
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\\.\\d{3}/g, "").replace(/Z$/, "Z");
+  const dateStamp = amzDate.slice(0, 8);
+  const scope = dateStamp + "/auto/s3/aws4_request";
+  const canonicalUri = "/" + awsEncode(R2_BUCKET) + "/" + objectKey.split("/").map(awsEncode).join("/");
+  const signedHeaders = method === "PUT" ? "content-type;host" : "host";
+  const params = [
+    ["X-Amz-Algorithm", "AWS4-HMAC-SHA256"],
+    ["X-Amz-Credential", R2_ACCESS_KEY_ID + "/" + scope],
+    ["X-Amz-Date", amzDate],
+    ["X-Amz-Expires", String(expiresSeconds)],
+    ["X-Amz-SignedHeaders", signedHeaders]
+  ].sort((a, b) => awsEncode(a[0]).localeCompare(awsEncode(b[0])));
+  const canonicalQuery = params.map(([k, v]) => awsEncode(k) + "=" + awsEncode(v)).join("&");
+  const canonicalHeaders = (method === "PUT" ? "content-type:" + contentType + "\\n" : "") + "host:" + host + "\\n";
+  const canonicalRequest = [method, canonicalUri, canonicalQuery, canonicalHeaders, signedHeaders, "UNSIGNED-PAYLOAD"].join("\\n");
+  const stringToSign = ["AWS4-HMAC-SHA256", amzDate, scope, crypto.createHash("sha256").update(canonicalRequest).digest("hex")].join("\\n");
+  const kDate = r2Hmac(Buffer.from("AWS4" + R2_SECRET_ACCESS_KEY), dateStamp);
+  const kRegion = r2Hmac(kDate, "auto");
+  const kService = r2Hmac(kRegion, "s3");
+  const kSigning = r2Hmac(kService, "aws4_request");
+  const signature = crypto.createHmac("sha256", kSigning).update(stringToSign).digest("hex");
+  return "https://" + host + canonicalUri + "?" + canonicalQuery + "&X-Amz-Signature=" + signature;
 }
 async function authUser(token) {
   const response = await fetch(SUPABASE_URL + "/auth/v1/user", { headers: { apikey: SUPABASE_ANON_KEY, authorization: "Bearer " + token } });
@@ -92,14 +131,29 @@ async function recordMessage(row) {
   });
   return Array.isArray(result) && result.length > 0;
 }
-async function xaiReply(business, message, history = []) {
+async function getBusinessKnowledge(businessId) {
+  const [profiles, products] = await Promise.all([
+    supa("twiga_business_profiles?select=business_summary,what_they_sell,what_they_do,products_and_services,target_customers,unique_selling_points,service_area,opening_hours,delivery_and_payment,returns_and_refunds,frequently_asked_questions,brand_voice,reply_language,assistant_instructions&business_id=eq." + encodeURIComponent(businessId) + "&limit=1"),
+    supa("twiga_products?select=name,description,category,price,currency,unit,stock_quantity,is_active&business_id=eq." + encodeURIComponent(businessId) + "&is_active=eq.true&order=name.asc&limit=40")
+  ]);
+  return { profile: profiles?.[0] || null, products: (products || []).map(p => ({
+    name: p.name, description: p.description, category: p.category, price: p.price,
+    currency: p.currency, unit: p.unit, available: Number(p.stock_quantity || 0) > 0
+  })) };
+}
+async function xaiReply(business, message, history = [], knowledge = { profile: null, products: [] }) {
   if (!XAI_API_KEY) throw new Error("XAI_API_KEY is not configured");
   const system = [
     DEFAULT_REPLY_PROMPT,
     "Business name: " + (business.name || "the business"),
     "Business type: " + (business.business_type || "local business"),
-    "Business-specific instructions: " + (business.whatsapp_prompt || "No additional instructions."),
-    "Rules: Answer only the customer's latest question using the supplied business context. Never claim an order was created, paid, dispatched, or an appointment booked unless the context explicitly confirms it. Do not send more than one short reply. If the customer asks for a human, acknowledge and say a team member will follow up."
+    "Business-specific WhatsApp instructions: " + (business.whatsapp_prompt || "No additional instructions."),
+    "Business profile facts (owner-provided): " + JSON.stringify(knowledge.profile || {}),
+    "Active product catalogue (business-scoped): " + JSON.stringify(knowledge.products || []),
+    "Reply language preference: " + (knowledge.profile?.reply_language || "match_customer"),
+    "Brand voice: " + (knowledge.profile?.brand_voice || "warm, helpful and professional"),
+    "Additional assistant instructions: " + (knowledge.profile?.assistant_instructions || ""),
+    "Rules: Answer only the customer's latest question using the supplied business context. Treat business profile and catalogue as the source of truth. Do not invent prices, stock, product features, opening hours or policies; if the catalogue has no match, ask one short question or offer staff follow-up. Never reveal cost prices, internal IDs or private staff notes. Never claim an order was created, paid, dispatched, or an appointment booked unless the context explicitly confirms it. Do not send more than one short reply. If the customer asks for a human, acknowledge and say a team member will follow up."
   ].join("\n\n");
   const messages = [{ role: "system", content: system }, ...history.filter(x => ["system","assistant","user"].includes(x.role) && x.content).slice(-10), { role: "user", content: message }];
   const response = await fetch("https://api.x.ai/v1/chat/completions", {
@@ -182,8 +236,11 @@ async function handleInbound(payload) {
   }
   if (!connection.ai_enabled || await isOptedOut(connection.business_id, phone)) return;
   try {
-    const context = await customerContext(connection.business_id, phone, sessionId, chatId);
-    const reply = await xaiReply({ ...business, whatsapp_prompt: connection.system_prompt }, body, context);
+    const [context, knowledge] = await Promise.all([
+      customerContext(connection.business_id, phone, sessionId, chatId),
+      getBusinessKnowledge(connection.business_id)
+    ]);
+    const reply = await xaiReply({ ...business, whatsapp_prompt: connection.system_prompt }, body, context, knowledge);
     const sent = await sendText(sessionId, chatId, reply);
     await supa("twiga_whatsapp_messages", {
       method: "POST", headers: { Prefer: "return=minimal" },
@@ -256,12 +313,88 @@ async function route(req, res) {
     res.setHeader("access-control-allow-origin", origin);
     res.setHeader("vary", "Origin");
     res.setHeader("access-control-allow-headers", "authorization,content-type");
-    res.setHeader("access-control-allow-methods", "GET,POST,PATCH,OPTIONS");
+    res.setHeader("access-control-allow-methods", "GET,POST,PATCH,DELETE,OPTIONS");
   }
   if (req.method === "OPTIONS") return json(res, 204, {});
   if (req.method === "GET" && url.pathname === "/healthz") return json(res, 200, { ok: true, service: "twiga-whatsapp-reply", model: XAI_MODEL });
   if (req.method === "POST" && url.pathname === "/webhooks/openwa") return handleWebhook(req, res);
   const businessId = url.searchParams.get("businessId");
+  if (req.method === "GET" && url.pathname === "/api/business/profile") {
+    const { business } = await requireBusiness(req, businessId);
+    const rows = await supa("twiga_business_profiles?select=*&business_id=eq." + encodeURIComponent(business.id) + "&limit=1");
+    return json(res, 200, { profile: rows?.[0] || null });
+  }
+  if (req.method === "PATCH" && url.pathname === "/api/business/profile") {
+    const body = parseJson(await readBody(req)); const { user, business } = await requireBusiness(req, body.businessId);
+    const fields = ["business_summary","what_they_sell","what_they_do","products_and_services","target_customers","unique_selling_points","service_area","opening_hours","delivery_and_payment","returns_and_refunds","frequently_asked_questions","brand_voice","reply_language","assistant_instructions"];
+    const patch = { business_id: business.id, updated_by: user.id, updated_at: new Date().toISOString() };
+    for (const key of fields) if (typeof body[key] === "string") patch[key] = body[key].slice(0, key === "assistant_instructions" || key === "frequently_asked_questions" ? 6000 : 3000);
+    const rows = await supa("twiga_business_profiles?on_conflict=business_id", {
+      method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(patch)
+    });
+    return json(res, 200, { saved: true, profile: rows?.[0] || patch });
+  }
+  if (req.method === "GET" && url.pathname === "/api/catalog/products") {
+    const { business } = await requireBusiness(req, businessId);
+    const rows = await supa("twiga_products?select=id,sku,name,description,category,price,currency,unit,stock_quantity,low_stock_threshold,image_key,barcode,is_active,created_at,updated_at&business_id=eq." + encodeURIComponent(business.id) + "&order=name.asc&limit=200");
+    return json(res, 200, { products: rows || [] });
+  }
+  if (req.method === "POST" && url.pathname === "/api/catalog/products") {
+    const body = parseJson(await readBody(req)); const { user, business } = await requireBusiness(req, body.businessId);
+    const name = String(body.name || "").trim();
+    const price = Number(body.price ?? 0); const stock = Number(body.stock_quantity ?? 0);
+    if (!name || name.length > 160 || !Number.isFinite(price) || price < 0 || !Number.isFinite(stock) || stock < 0) return json(res, 400, { error: "A product name and valid non-negative price/stock are required" });
+    const imageKey = body.image_key ? String(body.image_key) : null;
+    if (imageKey && !imageKey.startsWith("businesses/" + business.id + "/products/")) return json(res, 400, { error: "Product image must belong to this business" });
+    const row = {
+      business_id: business.id, created_by: user.id, sku: body.sku ? String(body.sku).slice(0,80) : null,
+      name, description: String(body.description || "").slice(0,3000), category: String(body.category || "").slice(0,120),
+      price, cost_price: body.cost_price === null || body.cost_price === undefined || body.cost_price === "" ? null : Number(body.cost_price),
+      currency: String(body.currency || "KES").slice(0,8), unit: String(body.unit || "piece").slice(0,40),
+      stock_quantity: stock, low_stock_threshold: Number(body.low_stock_threshold || 0), image_key: imageKey,
+      barcode: body.barcode ? String(body.barcode).slice(0,120) : null, is_active: body.is_active !== false
+    };
+    const rows = await supa("twiga_products", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(row) });
+    return json(res, 201, { product: rows?.[0] || null });
+  }
+  if (req.method === "PATCH" && url.pathname === "/api/catalog/products") {
+    const body = parseJson(await readBody(req)); const { business } = await requireBusiness(req, body.businessId);
+    if (!/^[0-9a-f-]{36}$/i.test(String(body.id || ""))) return json(res, 400, { error: "A valid product id is required" });
+    const allowed = ["sku","name","description","category","price","cost_price","currency","unit","stock_quantity","low_stock_threshold","image_key","barcode","is_active"];
+    const patch = {};
+    for (const key of allowed) if (Object.hasOwn(body, key)) patch[key] = body[key];
+    if (patch.image_key && !String(patch.image_key).startsWith("businesses/" + business.id + "/products/")) return json(res, 400, { error: "Product image must belong to this business" });
+    patch.updated_at = new Date().toISOString();
+    const rows = await supa("twiga_products?id=eq." + encodeURIComponent(body.id) + "&business_id=eq." + encodeURIComponent(business.id), {
+      method: "PATCH", headers: { Prefer: "return=representation" }, body: JSON.stringify(patch)
+    });
+    if (!rows?.length) return json(res, 404, { error: "Product not found" });
+    return json(res, 200, { product: rows[0] });
+  }
+  if (req.method === "DELETE" && url.pathname === "/api/catalog/products") {
+    const body = parseJson(await readBody(req)); const { business } = await requireBusiness(req, body.businessId);
+    if (!/^[0-9a-f-]{36}$/i.test(String(body.id || ""))) return json(res, 400, { error: "A valid product id is required" });
+    await supa("twiga_products?id=eq." + encodeURIComponent(body.id) + "&business_id=eq." + encodeURIComponent(business.id), { method: "DELETE", headers: { Prefer: "return=minimal" } });
+    return json(res, 200, { deleted: true });
+  }
+  if (req.method === "POST" && url.pathname === "/api/catalog/upload-url") {
+    const body = parseJson(await readBody(req)); const { business } = await requireBusiness(req, body.businessId);
+    const allowedTypes = new Set(["image/jpeg","image/png","image/webp"]);
+    const contentType = String(body.contentType || "").toLowerCase();
+    const sizeBytes = Number(body.sizeBytes || 0);
+    if (!allowedTypes.has(contentType) || !Number.isFinite(sizeBytes) || sizeBytes < 1 || sizeBytes > 5 * 1024 * 1024) {
+      return json(res, 400, { error: "Choose a JPG, PNG or WebP image up to 5 MB" });
+    }
+    const extension = contentType === "image/jpeg" ? "jpg" : contentType.split("/")[1];
+    const key = "businesses/" + business.id + "/products/" + crypto.randomUUID() + "." + extension;
+    return json(res, 200, { uploadUrl: presignR2("PUT", key, contentType), imageUrl: presignR2("GET", key), imageKey: key, expiresIn: 900 });
+  }
+  if (req.method === "GET" && url.pathname === "/api/catalog/image-url") {
+    const { business } = await requireBusiness(req, businessId);
+    const key = String(url.searchParams.get("key") || "");
+    if (!key.startsWith("businesses/" + business.id + "/products/") || key.includes("..")) return json(res, 403, { error: "Image does not belong to this business" });
+    return json(res, 200, { imageUrl: presignR2("GET", key), expiresIn: 900 });
+  }
   if (req.method === "POST" && url.pathname === "/api/whatsapp/connect") {
     const body = parseJson(await readBody(req)); return connect(req, res, body.businessId);
   }
