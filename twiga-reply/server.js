@@ -234,7 +234,7 @@ async function connect(req, res, businessId) {
   }
   if (!connection.webhook_id) {
     const hook = await openwa("/sessions/" + encodeURIComponent(connection.session_id) + "/webhooks", "POST", {
-      url: process.env.OPENWA_WEBHOOK_URL || (process.env.PUBLIC_BASE_URL || "") + "/webhooks/openwa",
+      url: process.env.OPENWA_WEBHOOK_URL || (process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "") + "/webhooks/openwa",
       events: ["message.received", "session.status", "session.authenticated", "session.disconnected"],
       secret: OPENWA_WEBHOOK_SECRET,
       retryCount: 3
