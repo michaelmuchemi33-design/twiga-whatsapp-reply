@@ -28,7 +28,7 @@ All dashboard routes require a Supabase access token in `Authorization: Bearer <
 - `PATCH /api/whatsapp/settings` body: `{ "businessId": "...", "aiEnabled": true, "systemPrompt": "..." }`
 - `GET /api/whatsapp/messages?businessId=...`
 - `POST /api/whatsapp/send` body: `{ "businessId": "...", "phone": "2547...", "message": "..." }` — authenticated staff reply.
-- `POST /api/whatsapp/followups` body: `{ "businessId": "...", "phone": "2547...", "message": "...", "dueAt": "ISO timestamp", "customerName": "..." }
+- `POST /api/whatsapp/followups` body: `{ "businessId": "...", "phone": "2547...", "message": "...", "dueAt": "ISO timestamp", "customerName": "...", "consentConfirmed": true }
 
 ## Reply safeguards
 - Only private one-to-one chats are auto-replied to; group chats, channels, broadcasts, calls and status events are not.
