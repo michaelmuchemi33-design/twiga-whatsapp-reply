@@ -27,6 +27,7 @@ All dashboard routes require a Supabase access token in `Authorization: Bearer <
 - `POST /api/whatsapp/disconnect` body: `{ "businessId": "..." }`
 - `PATCH /api/whatsapp/settings` body: `{ "businessId": "...", "aiEnabled": true, "systemPrompt": "..." }`
 - `GET /api/whatsapp/messages?businessId=...`
+- `POST /api/whatsapp/send` body: `{ "businessId": "...", "phone": "2547...", "message": "..." }` — authenticated staff reply.
 - `POST /api/whatsapp/followups` body: `{ "businessId": "...", "phone": "2547...", "message": "...", "dueAt": "ISO timestamp", "customerName": "..." }
 
 ## Reply safeguards
@@ -35,7 +36,7 @@ All dashboard routes require a Supabase access token in `Authorization: Bearer <
 - Webhook HMAC signatures are verified against the raw request body.
 - Message IDs are unique per OpenWA session; duplicate deliveries are ignored.
 - AI replies are off by default until a business owner enables them.
-- STOP / UNSUBSCRIBE / OPT OUT / CANCEL adds the sender to a business-scoped opt-out list.
+- STOP / UNSUBSCRIBE / OPT OUT / CANCEL adds the sender to a business-scoped opt-out list and cancels scheduled WhatsApp follow-ups; START opts them back in.
 - Scheduled follow-ups are sent only when `consent_status=opted_in`; do not use this for unsolicited marketing.
 - Every API operation checks the signed-in user's business membership. Service-role credentials never leave this server.
 
