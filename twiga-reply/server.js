@@ -55,7 +55,7 @@ function presignR2(method, objectKey, contentType = "", expiresSeconds = 900) {
   }
   const host = R2_ACCOUNT_ID + ".r2.cloudflarestorage.com";
   const now = new Date();
-  const amzDate = now.toISOString().replace(/[:-]|\\.\\d{3}/g, "").replace(/Z$/, "Z");
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
   const dateStamp = amzDate.slice(0, 8);
   const scope = dateStamp + "/auto/s3/aws4_request";
   const canonicalUri = "/" + awsEncode(R2_BUCKET) + "/" + objectKey.split("/").map(awsEncode).join("/");
@@ -68,9 +68,9 @@ function presignR2(method, objectKey, contentType = "", expiresSeconds = 900) {
     ["X-Amz-SignedHeaders", signedHeaders]
   ].sort((a, b) => awsEncode(a[0]).localeCompare(awsEncode(b[0])));
   const canonicalQuery = params.map(([k, v]) => awsEncode(k) + "=" + awsEncode(v)).join("&");
-  const canonicalHeaders = (method === "PUT" ? "content-type:" + contentType + "\\n" : "") + "host:" + host + "\\n";
-  const canonicalRequest = [method, canonicalUri, canonicalQuery, canonicalHeaders, signedHeaders, "UNSIGNED-PAYLOAD"].join("\\n");
-  const stringToSign = ["AWS4-HMAC-SHA256", amzDate, scope, crypto.createHash("sha256").update(canonicalRequest).digest("hex")].join("\\n");
+  const canonicalHeaders = (method === "PUT" ? "content-type:" + contentType + "\n" : "") + "host:" + host + "\n";
+  const canonicalRequest = [method, canonicalUri, canonicalQuery, canonicalHeaders, signedHeaders, "UNSIGNED-PAYLOAD"].join("\n");
+  const stringToSign = ["AWS4-HMAC-SHA256", amzDate, scope, crypto.createHash("sha256").update(canonicalRequest).digest("hex")].join("\n");
   const kDate = r2Hmac(Buffer.from("AWS4" + R2_SECRET_ACCESS_KEY), dateStamp);
   const kRegion = r2Hmac(kDate, "auto");
   const kService = r2Hmac(kRegion, "s3");
