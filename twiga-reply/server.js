@@ -401,9 +401,9 @@ async function route(req, res) {
   if (req.method === "GET" && url.pathname === "/api/whatsapp/status") {
     const { business } = await requireBusiness(req, businessId);
     const connection = await getConnection(business.id);
-    if (!connection) return json(res, 200, { connected: false, status: "not_connected" });
+    if (!connection) return json(res, 200, { connected: false, status: "not_connected", aiEnabled: false, systemPrompt: "" });
     const session = await openwa("/sessions/" + encodeURIComponent(connection.session_id));
-    return json(res, 200, { connected: session.status === "ready" || session.status === "connected", status: session.status || connection.status, phone: session.phone || null, aiEnabled: connection.ai_enabled, sessionId: connection.session_id });
+    return json(res, 200, { connected: session.status === "ready" || session.status === "connected", status: session.status || connection.status, phone: session.phone || null, aiEnabled: connection.ai_enabled, systemPrompt: connection.system_prompt || "", sessionId: connection.session_id });
   }
   if (req.method === "GET" && url.pathname === "/api/whatsapp/qr") {
     const { business } = await requireBusiness(req, businessId);
