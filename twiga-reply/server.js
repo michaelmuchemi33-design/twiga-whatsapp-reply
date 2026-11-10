@@ -101,7 +101,7 @@ async function xaiReply(business, message, history = []) {
     "Business-specific instructions: " + (business.whatsapp_prompt || "No additional instructions."),
     "Rules: Answer only the customer's latest question using the supplied business context. Never claim an order was created, paid, dispatched, or an appointment booked unless the context explicitly confirms it. Do not send more than one short reply. If the customer asks for a human, acknowledge and say a team member will follow up."
   ].join("\n\n");
-  const messages = [{ role: "system", content: system }, ...history.slice(-8).map(x => ({ role: x.direction === "outbound" ? "assistant" : "user", content: x.body || "" })), { role: "user", content: message }];
+  const messages = [{ role: "system", content: system }, ...history.filter(x => ["system","assistant","user"].includes(x.role) && x.content).slice(-10), { role: "user", content: message }];
   const response = await fetch("https://api.x.ai/v1/chat/completions", {
     method: "POST",
     headers: { authorization: "Bearer " + XAI_API_KEY, "content-type": "application/json" },
@@ -114,16 +114,22 @@ async function xaiReply(business, message, history = []) {
   if (!text) throw new Error("xAI returned an empty reply");
   return text.slice(0, 1800);
 }
-async function customerContext(businessId, phone) {
-  if (!phone) return [];
-  const customers = await supa("twiga_customers?select=id,name,phone,notes&business_id=eq." + encodeURIComponent(businessId) + "&phone=eq." + encodeURIComponent(phone) + "&limit=1");
-  if (!customers?.length) return [];
-  const customer = customers[0];
-  const [orders, appointments] = await Promise.all([
-    supa("twiga_orders?select=customer_name,total_amount,description,status,created_at&business_id=eq." + encodeURIComponent(businessId) + "&customer_name=eq." + encodeURIComponent(customer.name) + "&order=created_at.desc&limit=5"),
-    supa("twiga_appointments?select=customer_name,scheduled_at,notes,status&business_id=eq." + encodeURIComponent(businessId) + "&phone=eq." + encodeURIComponent(phone) + "&order=scheduled_at.desc&limit=5")
+async function customerContext(businessId, phone, sessionId, chatId) {
+  const [customers, history] = await Promise.all([
+    phone ? supa("twiga_customers?select=id,name,phone&business_id=eq." + encodeURIComponent(businessId) + "&phone=eq." + encodeURIComponent(phone) + "&limit=1") : Promise.resolve([]),
+    supa("twiga_whatsapp_messages?select=message_id,direction,body&business_id=eq." + encodeURIComponent(businessId) + "&session_id=eq." + encodeURIComponent(sessionId) + "&chat_id=eq." + encodeURIComponent(chatId) + "&order=created_at.desc&limit=10")
   ]);
-  return [{ role: "system", content: "Verified customer context (do not reveal internal notes): " + JSON.stringify({ customer: { name: customer.name, notes: customer.notes }, orders, appointments }) }];
+  const customer = customers?.[0];
+  let orders = [], appointments = [];
+  if (customer) {
+    [orders, appointments] = await Promise.all([
+      supa("twiga_orders?select=customer_name,total_amount,description,status,created_at&business_id=eq." + encodeURIComponent(businessId) + "&customer_name=eq." + encodeURIComponent(customer.name) + "&order=created_at.desc&limit=5"),
+      supa("twiga_appointments?select=customer_name,scheduled_at,notes,status&business_id=eq." + encodeURIComponent(businessId) + "&phone=eq." + encodeURIComponent(phone) + "&order=scheduled_at.desc&limit=5")
+    ]);
+  }
+  const context = { knownCustomer: customer ? { name: customer.name } : null, orders, appointments };
+  const prior = (history || []).slice(1, 9).reverse().map(x => ({ role: x.direction === "outbound" ? "assistant" : "user", content: x.body || "" }));
+  return [{ role: "system", content: "Verified business records for this sender (do not expose internal IDs): " + JSON.stringify(context) }, ...prior];
 }
 async function sendText(sessionId, chatId, text) {
   return openwa("/sessions/" + encodeURIComponent(sessionId) + "/messages/send-text", "POST", { chatId, text, linkPreview: false });
@@ -157,17 +163,26 @@ async function handleInbound(payload) {
   });
   if (!inserted) return; // idempotency: never answer the same WhatsApp message twice
   const stop = /^(stop|unsubscribe|opt[\s-]?out|cancel)$/i.test(body);
+  const start = /^start$/i.test(body);
   if (stop) {
     await supa("twiga_whatsapp_optouts?on_conflict=business_id,phone", {
       method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
       body: JSON.stringify({ business_id: connection.business_id, phone, source: "whatsapp_keyword" })
     });
-    if (connection.ai_enabled) await sendText(sessionId, chatId, "Understood. We will not send you further WhatsApp follow-ups. Reply START if you want to opt in again.");
+    await supa("twiga_followups?business_id=eq." + encodeURIComponent(connection.business_id) + "&phone_number=eq." + encodeURIComponent(phone) + "&channel=eq.whatsapp&status=in.(scheduled,in_progress)", {
+      method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ status: "cancelled", consent_status: "opted_out" })
+    }).catch(() => {});
+    await sendText(sessionId, chatId, "Understood. We will not send you further WhatsApp follow-ups. Reply START if you want to opt in again.");
+    return;
+  }
+  if (start) {
+    await supa("twiga_whatsapp_optouts?business_id=eq." + encodeURIComponent(connection.business_id) + "&phone=eq." + encodeURIComponent(phone), { method: "DELETE", headers: { Prefer: "return=minimal" } });
+    await sendText(sessionId, chatId, "Thanks. You have opted back in to WhatsApp messages from this business.");
     return;
   }
   if (!connection.ai_enabled || await isOptedOut(connection.business_id, phone)) return;
   try {
-    const context = await customerContext(connection.business_id, phone);
+    const context = await customerContext(connection.business_id, phone, sessionId, chatId);
     const reply = await xaiReply({ ...business, whatsapp_prompt: connection.system_prompt }, body, context);
     const sent = await sendText(sessionId, chatId, reply);
     await supa("twiga_whatsapp_messages", {
@@ -197,7 +212,8 @@ async function handleWebhook(req, res) {
     await handleInbound(payload);
   } else if (payload.event === "session.status" || payload.event === "session.authenticated" || payload.event === "session.disconnected") {
     const sessionId = payload.sessionId;
-    const status = payload.event === "session.authenticated" ? "connected" : payload.event === "session.disconnected" ? "disconnected" : (payload.data?.status || "connecting");
+    const rawStatus = payload.data?.status || "connecting";
+    const status = payload.event === "session.authenticated" || rawStatus === "ready" ? "connected" : payload.event === "session.disconnected" ? "disconnected" : rawStatus;
     if (sessionId) await supa("twiga_whatsapp_connections?session_id=eq." + encodeURIComponent(sessionId), {
       method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ status, updated_at: new Date().toISOString() })
     });
@@ -227,9 +243,11 @@ async function connect(req, res, businessId) {
   }
   try { await openwa("/sessions/" + encodeURIComponent(connection.session_id) + "/start", "POST", {}); }
   catch (e) { if (![400,409].includes(e.status)) throw e; }
-  const qr = await openwa("/sessions/" + encodeURIComponent(connection.session_id) + "/qr");
+  let qr = null;
+  try { qr = await openwa("/sessions/" + encodeURIComponent(connection.session_id) + "/qr"); }
+  catch (error) { if (![400,409].includes(error.status)) throw error; }
   await updateConnection(businessId, { status: "connecting", business_name: business.name });
-  return json(res, 200, { businessId, sessionId: connection.session_id, status: "connecting", qr });
+  return json(res, qr ? 200 : 202, { businessId, sessionId: connection.session_id, status: "connecting", qr, qrReady: Boolean(qr) });
 }
 async function route(req, res) {
   const url = new URL(req.url, "http://localhost");
@@ -276,6 +294,18 @@ async function route(req, res) {
     if (typeof body.systemPrompt === "string") patch.system_prompt = body.systemPrompt.slice(0, 4000);
     await updateConnection(business.id, patch);
     return json(res, 200, { saved: true, ...patch });
+  }
+  if (req.method === "POST" && url.pathname === "/api/whatsapp/send") {
+    const body = parseJson(await readBody(req)); const { business } = await requireBusiness(req, body.businessId);
+    const connection = await getConnection(business.id);
+    const phone = String(body.phone || "").replace(/\D/g, "");
+    const message = String(body.message || "").trim();
+    if (!connection || connection.status !== "connected") return json(res, 409, { error: "WhatsApp is not connected" });
+    if (phone.length < 10 || phone.length > 15 || !message || message.length > 1800) return json(res, 400, { error: "Valid phone and message (1–1800 characters) are required" });
+    if (await isOptedOut(business.id, phone)) return json(res, 409, { error: "This customer has opted out of WhatsApp messages" });
+    const result = await sendText(connection.session_id, toChatId(phone), message);
+    await supa("twiga_whatsapp_messages", { method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ business_id: business.id, session_id: connection.session_id, message_id: "manual_" + crypto.randomUUID(), chat_id: toChatId(phone), sender_id: "twiga_staff", direction: "outbound", body: message, status: "sent", metadata: { source: "dashboard", provider_message: result } }) });
+    return json(res, 200, { sent: true });
   }
   if (req.method === "GET" && url.pathname === "/api/whatsapp/messages") {
     const { business } = await requireBusiness(req, businessId);
