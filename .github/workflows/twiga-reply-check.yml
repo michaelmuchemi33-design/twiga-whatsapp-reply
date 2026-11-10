@@ -1,4 +1,4 @@
-name: TWIGA Reply syntax check
+name: TWIGA Reply syntax and health check
 on:
   push:
     paths:
@@ -9,7 +9,7 @@ on:
       - "twiga-reply/**"
       - ".github/workflows/twiga-reply-check.yml"
 jobs:
-  syntax:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,3 +19,6 @@ jobs:
       - name: Check server JavaScript syntax
         working-directory: twiga-reply
         run: npm run check
+      - name: Smoke-test service startup and health endpoint
+        working-directory: twiga-reply
+        run: npm test
