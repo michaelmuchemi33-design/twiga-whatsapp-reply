@@ -1,0 +1,21 @@
+name: TWIGA Reply syntax check
+on:
+  push:
+    paths:
+      - "twiga-reply/**"
+      - ".github/workflows/twiga-reply-check.yml"
+  pull_request:
+    paths:
+      - "twiga-reply/**"
+      - ".github/workflows/twiga-reply-check.yml"
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check server JavaScript syntax
+        working-directory: twiga-reply
+        run: npm run check
