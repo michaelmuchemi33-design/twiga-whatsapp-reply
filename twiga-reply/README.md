@@ -42,3 +42,30 @@ All dashboard routes require a Supabase access token in `Authorization: Bearer <
 
 ## WhatsApp account note
 OpenWA links a WhatsApp account as a companion device using the QR shown in TWIGA. This is an unofficial WhatsApp Web integration, not the official WhatsApp Business Platform Cloud API. WhatsApp can change or restrict companion-device automation. Use only accounts you own or are authorized to manage, respect opt-outs and customer consent, and test with a low-volume business number first.
+
+
+## Business knowledge and POS catalogue
+
+Every business has its own `twiga_business_profiles` row and its own `twiga_products` rows. The profile is where the owner explains what the business does, what it sells, who it serves, opening hours, service area, delivery/payment and return policies, FAQs, preferred tone/language, and custom receptionist instructions. The assistant loads only the selected business's profile and active products before drafting a WhatsApp reply.
+
+API routes (all require a Supabase bearer token and membership in the requested business):
+- `GET /api/business/profile?businessId=...`
+- `PATCH /api/business/profile` with `businessId` and profile fields
+- `GET /api/catalog/products?businessId=...`
+- `POST /api/catalog/products`
+- `PATCH /api/catalog/products`
+- `DELETE /api/catalog/products`
+- `POST /api/catalog/upload-url` with `businessId`, `contentType`, and `sizeBytes`
+- `GET /api/catalog/image-url?businessId=...&key=...`
+
+Product images are private R2 objects stored beneath `businesses/<business-id>/products/`. The service only signs keys under the authenticated business's own prefix. Upload URL expiry is 15 minutes; supported types are JPG, PNG and WebP; maximum upload is 5 MB.
+
+### Cloudflare R2 environment
+
+Set these as private Render environment variables (never commit them or put them in the APK):
+- `R2_ACCOUNT_ID`
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
+- `R2_BUCKET=twiga-product-images`
+
+R2 must first be enabled for the Cloudflare account and the bucket created. The API can then sign private PUT and GET URLs directly against the Cloudflare R2 S3-compatible endpoint. No public bucket is required.
