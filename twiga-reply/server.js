@@ -460,7 +460,6 @@ async function route(req, res) {
 }
 const server = http.createServer(async (req, res) => {
   try {
-    if (req.method === "GET" && req.url === "/healthz") return json(res, 200, { ok: true });
     await route(req, res);
   } catch (error) {
     console.error("Request failed", error.message);
