@@ -1,0 +1,21 @@
+name: TWIGA WhatsApp Reply checks
+on:
+  push:
+    paths:
+      - "twiga-reply/**"
+      - ".github/workflows/twiga-whatsapp-reply.yml"
+  pull_request:
+    paths:
+      - "twiga-reply/**"
+      - ".github/workflows/twiga-whatsapp-reply.yml"
+  workflow_dispatch:
+jobs:
+  node-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check JavaScript syntax
+        run: npm --prefix twiga-reply run check
