@@ -42,6 +42,24 @@ test("TWIGA reply service starts and responds to /healthz", async () => {
     assert.equal(body.ok, true);
     assert.equal(body.service, "twiga-whatsapp-reply");
     assert.ok(body.model);
+
+    const base = "http://127.0.0.1:" + port;
+    const unauthStatus = await fetch(base + "/api/whatsapp/status?businessId=00000000-0000-0000-0000-000000000001");
+    assert.equal(unauthStatus.status, 401, "business WhatsApp routes must require a signed-in user");
+
+    const unauthUpload = await fetch(base + "/api/catalog/upload-url", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ businessId: "00000000-0000-0000-0000-000000000001", contentType: "image/png", sizeBytes: 128 })
+    });
+    assert.equal(unauthUpload.status, 401, "product image signing must require business membership");
+
+    const unsignedWebhook = await fetch(base + "/webhooks/openwa", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event: "message.received", sessionId: "test", data: {} })
+    });
+    assert.equal(unsignedWebhook.status, 401, "OpenWA webhooks must reject unsigned events");
   } finally {
     child.kill("SIGTERM");
     await new Promise(resolve => {
