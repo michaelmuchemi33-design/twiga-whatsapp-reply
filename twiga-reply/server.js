@@ -316,9 +316,10 @@ async function route(req, res) {
     const body = parseJson(await readBody(req)); const { user, business } = await requireBusiness(req, body.businessId);
     const phone = String(body.phone || "").replace(/\D/g, "");
     if (phone.length < 10 || phone.length > 15 || !body.message || !body.dueAt) return json(res, 400, { error: "Valid phone, message and dueAt are required" });
+    if (body.consentConfirmed !== true) return json(res, 400, { error: "Confirm that the customer has opted in to WhatsApp follow-ups before scheduling" });
     const row = await supa("twiga_followups", {
       method: "POST", headers: { Prefer: "return=representation" },
-      body: JSON.stringify({ business_id: business.id, customer_name: body.customerName || null, phone_number: phone, task: String(body.message).slice(0, 1500), channel: "whatsapp", due_at: body.dueAt, status: "scheduled", consent_status: "opted_in", created_by: user.id, metadata: { source: "twiga_whatsapp_reply" } })
+      body: JSON.stringify({ business_id: business.id, customer_name: body.customerName || null, phone_number: phone, task: String(body.message).slice(0, 1500), channel: "whatsapp", due_at: body.dueAt, status: "scheduled", consent_status: "opted_in", created_by: user.id, metadata: { source: "twiga_whatsapp_reply", consent_confirmed_at: new Date().toISOString() } })
     });
     return json(res, 201, { followup: row?.[0] || null });
   }
